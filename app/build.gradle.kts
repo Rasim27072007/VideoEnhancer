@@ -1,5 +1,5 @@
 plugins {
-    id("com.android.application")
+    litert-gpu, litert-gpu-api
     id("org.jetbrains.kotlin.android")
 }
 
