@@ -1,5 +1,5 @@
 plugins {
-    litert-gpu, litert-gpu-api
+    id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
 
@@ -40,4 +40,6 @@ dependencies {
     implementation("androidx.media3:media3-effect:1.4.1")
     implementation("androidx.media3:media3-transformer:1.4.1")
     implementation("com.google.ai.edge.litert:litert:1.4.2")
+    implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
+    implementation("com.google.ai.edge.litert:litert-gpu-api:1.4.2")
 }
