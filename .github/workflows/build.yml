@@ -11,6 +11,12 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Download AI model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -L --fail -o app/src/main/assets/esrgan.tflite https://huggingface.co/qualcomm/Real-ESRGAN-General-x4v3/resolve/main/Real-ESRGAN-General-x4v3.tflite
+          ls -l app/src/main/assets
+          test "$(stat -c%s app/src/main/assets/esrgan.tflite)" -gt 1000000
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
