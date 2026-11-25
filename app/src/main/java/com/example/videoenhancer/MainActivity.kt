@@ -1,9 +1,13 @@
 package com.example.videoenhancer
 
+import android.content.ContentValues
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -26,10 +30,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.media3.common.MediaItem
+import androidx.media3.effect.Presentation
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.Effects
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.Transformer
+import java.io.File
 
 const val MAX_SECONDS = 120
 
 data class VideoInfo(val width: Int, val height: Int, val seconds: Double)
+
+var activeTransformer: Transformer? = null
 
 fun readInfo(context: Context, uri: Uri): VideoInfo? {
     val r = MediaMetadataRetriever()
@@ -60,6 +75,77 @@ fun readInfo(context: Context, uri: Uri): VideoInfo? {
     }
 }
 
+fun saveToGallery(context: Context, file: File): Boolean {
+    if (Build.VERSION.SDK_INT < 29) return false
+    val values = ContentValues().apply {
+        put(
+            MediaStore.Video.Media.DISPLAY_NAME,
+            "enhanced_${System.currentTimeMillis()}.mp4"
+        )
+        put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+        put(
+            MediaStore.Video.Media.RELATIVE_PATH,
+            Environment.DIRECTORY_MOVIES + "/VideoEnhancer"
+        )
+    }
+    val resolver = context.contentResolver
+    val target = resolver.insert(
+        MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values
+    ) ?: return false
+    resolver.openOutputStream(target)?.use { out ->
+        file.inputStream().use { it.copyTo(out) }
+    }
+    return true
+}
+
+fun startEnhance(
+    context: Context,
+    uri: Uri,
+    info: VideoInfo,
+    onStatus: (String) -> Unit
+) {
+    val outFile = File(
+        context.cacheDir, "out_${System.currentTimeMillis()}.mp4"
+    )
+    val targetHeight = minOf(info.height * 2, 2160)
+
+    val effects = Effects(
+        emptyList(),
+        listOf(Presentation.createForHeight(targetHeight))
+    )
+    val edited = EditedMediaItem.Builder(MediaItem.fromUri(uri))
+        .setEffects(effects)
+        .build()
+
+    val transformer = Transformer.Builder(context)
+        .addListener(object : Transformer.Listener {
+            override fun onCompleted(
+                composition: Composition,
+                exportResult: ExportResult
+            ) {
+                val ok = saveToGallery(context, outFile)
+                outFile.delete()
+                onStatus(
+                    if (ok) "Hazırdır! Qalereyada Movies/VideoEnhancer qovluğuna bax"
+                    else "Emal bitdi, amma qalereyaya yazmaq alınmadı"
+                )
+            }
+
+            override fun onError(
+                composition: Composition,
+                exportResult: ExportResult,
+                exportException: ExportException
+            ) {
+                onStatus("Xəta: ${exportException.message}")
+            }
+        })
+        .build()
+
+    activeTransformer = transformer
+    onStatus("Emal olunur, gözləyin...")
+    transformer.start(edited, outFile.absolutePath)
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,12 +162,14 @@ fun HomeScreen() {
     val context = LocalContext.current
     var videoUri by remember { mutableStateOf<Uri?>(null) }
     var info by remember { mutableStateOf<VideoInfo?>(null) }
+    var status by remember { mutableStateOf("") }
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
         videoUri = uri
         info = if (uri != null) readInfo(context, uri) else null
+        status = ""
     }
 
     Column(
@@ -99,7 +187,8 @@ fun HomeScreen() {
         Spacer(Modifier.height(16.dp))
 
         val i = info
-        if (videoUri == null) {
+        val u = videoUri
+        if (u == null) {
             Text("Video seçilməyib")
         } else if (i == null) {
             Text("Videonun məlumatı oxunmadı")
@@ -111,8 +200,14 @@ fun HomeScreen() {
             if (i.seconds > MAX_SECONDS) {
                 Text("Video 2 dəqiqədən uzundur, qısa video seç")
             } else {
-                Text("Video uyğundur")
+                Button(onClick = {
+                    startEnhance(context, u, i) { status = it }
+                }) {
+                    Text("Keyfiyyəti artır (2x)")
+                }
             }
         }
+        Spacer(Modifier.height(16.dp))
+        Text(status)
     }
 }
