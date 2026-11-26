@@ -31,6 +31,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    androidResources {
+        noCompress += "tflite"
+    }
 }
 
 dependencies {
@@ -43,4 +47,7 @@ dependencies {
     implementation("androidx.media3:media3-common:1.4.1")
     implementation("androidx.media3:media3-transformer:1.4.1")
     implementation("androidx.media3:media3-effect:1.4.1")
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-gpu-api:2.14.0")
 }
