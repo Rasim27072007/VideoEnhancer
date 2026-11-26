@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -44,6 +45,48 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.channels.Channels
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+
+object AiState {
+    var original by mutableStateOf<Bitmap?>(null)
+    var result by mutableStateOf<Bitmap?>(null)
+    var status by mutableStateOf("Şəkil seç")
+    var busy by mutableStateOf(false)
+    var upscaler: Upscaler? = null
+    val handler = Handler(Looper.getMainLooper())
+    val worker: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "ai-worker")
+    }
+}
+
+private fun loadModelBuffer(context: Context): ByteBuffer {
+    try {
+        context.assets.open("esrgan.tflite").use { input ->
+            val size = input.available()
+            if (size > 0) {
+                val buf = ByteBuffer.allocateDirect(size)
+                    .order(ByteOrder.nativeOrder())
+                val ch = Channels.newChannel(input)
+                while (buf.hasRemaining()) {
+                    if (ch.read(buf) < 0) break
+                }
+                if (!buf.hasRemaining() && input.read() == -1) {
+                    buf.rewind()
+                    return buf
+                }
+            }
+        }
+    } catch (e: Exception) {
+    }
+    val bytes = context.assets.open("esrgan.tflite").use { it.readBytes() }
+    val buf = ByteBuffer.allocateDirect(bytes.size)
+        .order(ByteOrder.nativeOrder())
+    buf.put(bytes)
+    buf.rewind()
+    return buf
+}
 
 class Upscaler(context: Context) {
     private var gpuDelegate: GpuDelegate? = null
@@ -84,11 +127,7 @@ class Upscaler(context: Context) {
     }
 
     init {
-        val bytes = context.assets.open("esrgan.tflite").use { it.readBytes() }
-        val model = ByteBuffer.allocateDirect(bytes.size)
-            .order(ByteOrder.nativeOrder())
-        model.put(bytes)
-        model.rewind()
+        val model = loadModelBuffer(context)
 
         var gpuIp: Interpreter? = null
         try {
@@ -249,6 +288,18 @@ fun loadScaledBitmap(context: Context, uri: Uri, maxSide: Int): Bitmap? {
     }
 }
 
+fun makePreview(bmp: Bitmap, maxSide: Int): Bitmap {
+    val longest = maxOf(bmp.width, bmp.height)
+    if (longest <= maxSide) return bmp
+    val f = maxSide.toFloat() / longest
+    return Bitmap.createScaledBitmap(
+        bmp,
+        (bmp.width * f).toInt().coerceAtLeast(1),
+        (bmp.height * f).toInt().coerceAtLeast(1),
+        true
+    )
+}
+
 fun saveImageToGallery(context: Context, bmp: Bitmap): Boolean {
     if (Build.VERSION.SDK_INT < 29) return false
     val values = ContentValues().apply {
@@ -274,23 +325,25 @@ fun saveImageToGallery(context: Context, bmp: Bitmap): Boolean {
 @Composable
 fun AiTestSection() {
     val context = LocalContext.current
-    var original by remember { mutableStateOf<Bitmap?>(null) }
-    var result by remember { mutableStateOf<Bitmap?>(null) }
-    var status by remember { mutableStateOf("Şəkil seç") }
-    var busy by remember { mutableStateOf(false) }
-    val handler = remember { Handler(Looper.getMainLooper()) }
+    val app = context.applicationContext
 
     val picker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
-        if (uri != null) {
-            val bmp = loadScaledBitmap(context, uri, 512)
-            original = bmp
-            result = null
-            status = if (bmp == null) {
-                "Şəkil oxunmadı"
-            } else {
-                "Şəkil hazırdır: ${bmp.width} x ${bmp.height}"
+        if (uri != null && !AiState.busy) {
+            AiState.status = "Şəkil oxunur..."
+            AiState.worker.execute {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+                val bmp = loadScaledBitmap(app, uri, 512)
+                AiState.handler.post {
+                    AiState.original = bmp
+                    AiState.result = null
+                    AiState.status = if (bmp == null) {
+                        "Şəkil oxunmadı"
+                    } else {
+                        "Şəkil hazırdır: ${bmp.width} x ${bmp.height}"
+                    }
+                }
             }
         }
     }
@@ -304,72 +357,84 @@ fun AiTestSection() {
     ) {
         Text("AI test (4x)", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(12.dp))
-        Button(onClick = { picker.launch("image/*") }) {
+        Button(
+            enabled = !AiState.busy,
+            onClick = { picker.launch("image/*") }
+        ) {
             Text("Şəkil seç")
         }
         Spacer(Modifier.height(8.dp))
         Button(
-            enabled = !busy && original != null,
+            enabled = !AiState.busy && AiState.original != null,
             onClick = {
-                val src = original
-                if (src != null) {
-                    busy = true
-                    status = "Model yüklənir (GPU yoxlanılır)..."
-                    Thread {
+                val src = AiState.original
+                if (src != null && !AiState.busy) {
+                    AiState.busy = true
+                    AiState.status = "Model yüklənir (GPU yoxlanılır)..."
+                    AiState.worker.execute {
+                        Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
                         try {
                             val start = System.currentTimeMillis()
-                            val up = Upscaler(context)
+                            val up = AiState.upscaler
+                                ?: Upscaler(app).also { AiState.upscaler = it }
                             val be = up.backend
-                            handler.post { status = "Başladı [$be]..." }
+                            AiState.handler.post { AiState.status = "Başladı [$be]..." }
                             val out = up.upscale(src) { d, t ->
-                                handler.post {
-                                    status = "Emal olunur [$be]: ${d * 100 / t}% ($d/$t)"
+                                AiState.handler.post {
+                                    AiState.status =
+                                        "Emal olunur [$be]: ${d * 100 / t}% ($d/$t)"
                                 }
                             }
                             val sec = (System.currentTimeMillis() - start) / 1000.0
-                            val saved = saveImageToGallery(context, out)
+                            val saved = saveImageToGallery(app, out)
                             val tail = if (saved) {
                                 " Pictures/VideoEnhancer qovluğunda saxlanıldı"
                             } else {
                                 ""
                             }
-                            handler.post {
-                                result = out
-                                busy = false
-                                status = "Hazırdır [$be]: ${out.width} x ${out.height}, " +
+                            val fullW = out.width
+                            val fullH = out.height
+                            val preview = makePreview(out, 1280)
+                            if (preview !== out) out.recycle()
+                            AiState.handler.post {
+                                AiState.result = preview
+                                AiState.busy = false
+                                AiState.status = "Hazırdır [$be]: $fullW x $fullH, " +
                                     "${"%.1f".format(sec)} san." + tail
                             }
                         } catch (e: Throwable) {
-                            handler.post {
-                                busy = false
-                                status = "Xəta: ${e.message}"
+                            AiState.handler.post {
+                                AiState.busy = false
+                                AiState.status = "Xəta: ${e.message}"
                             }
                         }
-                    }.start()
+                    }
                 }
             }
         ) {
             Text("AI ilə böyüt")
         }
         Spacer(Modifier.height(12.dp))
-        Text(status)
+        Text(AiState.status)
         Spacer(Modifier.height(12.dp))
 
-        val o = original
+        val o = AiState.original
         if (o != null) {
             Text("Əvvəl:")
+            val oImg = remember(o) { o.asImageBitmap() }
             Image(
-                bitmap = o.asImageBitmap(),
+                bitmap = oImg,
                 contentDescription = null,
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(12.dp))
         }
-        val r = result
+        val r = AiState.result
         if (r != null) {
             Text("AI ilə sonra:")
+            val rImg = remember(r) { r.asImageBitmap() }
             Image(
-                bitmap = r.asImageBitmap(),
+                bitmap = rImg,
                 contentDescription = null,
                 modifier = Modifier.fillMaxWidth()
             )
